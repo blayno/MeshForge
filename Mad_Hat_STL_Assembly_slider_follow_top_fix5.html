@@ -26,6 +26,14 @@ button:hover{border-color:var(--teal);background:#203147}button.primary{backgrou
 .view-tools{position:absolute;top:12px;left:12px;display:flex;flex-direction:column;gap:6px;z-index:2}.view-tools button{font-size:18px;padding:7px 10px;background:#101a29dd}
 .view-label{position:absolute;bottom:12px;left:12px;color:#b9c8dc;background:#101722cc;border:1px solid #35445a;border-radius:7px;padding:8px 10px;font-size:11px;pointer-events:none}
 .viewer-hint{position:absolute;right:12px;top:12px;background:#101722cc;border:1px solid #35445a;border-radius:7px;padding:8px 10px;font-size:11px;color:var(--muted);pointer-events:none}
+.layer-preview{position:absolute;top:62px;right:12px;bottom:58px;width:82px;z-index:3;padding:11px 9px;background:#101722ed;border:1px solid #3b5271;border-radius:9px;backdrop-filter:blur(8px);display:flex;flex-direction:column;align-items:center;gap:8px}
+.layer-preview-head{display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;font-size:11px;width:100%}
+.layer-preview-head strong{color:var(--accent);font-size:12px}
+#layerReadout{color:var(--text);font-size:10px;line-height:1.4;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+#layerSlider{display:block;flex:1;min-height:100px;width:100%;margin:4px 0;accent-color:var(--accent);cursor:pointer;writing-mode:vertical-lr;direction:rtl}
+#layerSlider:disabled{opacity:.4;cursor:not-allowed}
+.layer-preview-foot{display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--muted);font-size:10px;font-variant-numeric:tabular-nums}
+@media(max-width:700px){.layer-preview{top:58px;right:8px;bottom:58px;width:72px;padding:9px 7px}.viewer-hint{max-width:60%;font-size:10px}}
 .group{border-top:1px solid var(--line);padding:12px 0}.group:first-of-type{border-top:0}.group-title{font-weight:bold;margin-bottom:10px}
 label{display:block;color:#bdc9db;font-size:12px;margin-bottom:5px}input[type=number],input[type=text],select{width:100%;background:#101722;border:1px solid #3a4b63;border-radius:6px;color:var(--text);padding:8px;font-size:12px;min-width:0}
 input[type=color]{width:100%;height:34px;padding:2px;background:#101722;border:1px solid #3a4b63;border-radius:6px}
@@ -81,6 +89,17 @@ footer strong{color:var(--accent)}.footer-spacer{margin-left:auto}
       <button id="toggleGrid" title="Toggle build plate">▦</button>
     </div>
     <div class="viewer-hint">Left-drag: orbit · Right-drag: pan · Wheel: zoom</div>
+    <div class="layer-preview" id="layerPreview">
+      <div class="layer-preview-head">
+        <strong>Layer Preview</strong>
+        <span id="layerReadout">No model loaded</span>
+      </div>
+      <input id="layerSlider" type="range" min="0" max="0" step="0.2" value="0" disabled aria-label="Preview model up to layer height">
+      <div class="layer-preview-foot">
+        <span id="layerBottom">0.00 mm</span>
+        <span id="layerTop">0.00 mm</span>
+      </div>
+    </div>
     <div class="view-label" id="viewStatus">No model loaded — add STL files to begin</div>
   </section>
   <section class="panel side right">
@@ -170,6 +189,10 @@ const axes=new THREE.AxesHelper(28);axes.position.set(-100,-100,.1);scene.add(ax
 let parts=[],selectedId=null,nextId=1,showGrid=true,showWire=false;
 const colors=['#62d6bd','#8b9dff','#ffb86b','#ff647c','#e8e879','#76b8ff','#c18cff'];
 const loader=new STLLoader(), exporter=new STLExporter();
+// Shared Z clipping plane for the slicer-style layer preview.
+// Geometry and exported STL data remain unchanged.
+const layerPlane=new THREE.Plane(new THREE.Vector3(0,0,-1),0);
+renderer.localClippingEnabled=true;
 
 function toast(msg){const t=$('toast');t.textContent=msg;t.style.display='block';clearTimeout(toast.timer);toast.timer=setTimeout(()=>t.style.display='none',2600)}
 function safeName(s){return s.replace(/\.stl$/i,'').replace(/[^\w.-]+/g,'_').slice(0,80)||'part'}
@@ -183,13 +206,13 @@ function addFiles(files){const arr=[...files].filter(f=>/\.stl$/i.test(f.name));
     // Do not center the geometry, move its bottom to Z=0, or add an import offset.
     const importIndex=parts.length;
     const importColor=colors[importIndex%colors.length];
-    const mat=new THREE.MeshStandardMaterial({color:importColor,roughness:.48,metalness:.03,side:THREE.DoubleSide});
+    const mat=new THREE.MeshStandardMaterial({color:importColor,roughness:.48,metalness:.03,side:THREE.DoubleSide,clippingPlanes:[layerPlane]});
     const mesh=new THREE.Mesh(geometry,mat);mesh.castShadow=true;mesh.receiveShadow=true;
     const id=nextId++;
     const part={id,name:file.name,baseName:safeName(file.name),mesh,color:importColor,
       initial:{x:0,y:0,z:0,rx:0,ry:0,rz:0,sx:1,sy:1,sz:1}};
     mesh.position.set(0,0,0);mesh.userData.partId=id;scene.add(mesh);parts.push(part);
-    if(parts.length===1||selectedId===null)selectPart(id);renderList();updateStats();fitView(false);toast('Loaded '+file.name);
+    if(parts.length===1||selectedId===null)selectPart(id);renderList();updateStats();updateLayerPreview(true);fitView(false);toast('Loaded '+file.name);
   }catch(err){console.error(err);toast('Could not read '+file.name+'. Check that it is a valid STL.')}};reader.readAsArrayBuffer(file)});
 }
 function renderList(){const list=$('fileList');list.innerHTML='';
@@ -235,13 +258,62 @@ $('resetAll').onclick=()=>{parts.forEach(p=>{
 });updateStats();if(selectedId)selectPart(selectedId);fitView(false);toast('All parts returned to their imported positions')};
 $('duplicate').onclick=()=>{const p=selected();if(!p)return;const geo=p.mesh.geometry.clone(),mat=p.mesh.material.clone(),mesh=new THREE.Mesh(geo,mat);mesh.position.copy(p.mesh.position).add(new THREE.Vector3(5,5,0));mesh.rotation.copy(p.mesh.rotation);mesh.scale.copy(p.mesh.scale);mesh.castShadow=true;mesh.receiveShadow=true;const id=nextId++;mesh.userData.partId=id;scene.add(mesh);parts.push({id,name:p.baseName+'_copy.stl',baseName:p.baseName+'_copy',mesh,color:p.color,initial:{}});selectPart(id);updateStats();toast('Part duplicated')};
 $('deletePart').onclick=()=>{const p=selected();if(!p)return;scene.remove(p.mesh);p.mesh.geometry.dispose();p.mesh.material.dispose();parts=parts.filter(q=>q!==p);selectedId=parts.length?parts[0].id:null;renderList();if(selectedId)selectPart(selectedId);else{$('selectedName').textContent='No part selected'}updateStats();toast('Selected part deleted')};
-$('clearAll').onclick=()=>{parts.forEach(p=>{scene.remove(p.mesh);p.mesh.geometry.dispose();p.mesh.material.dispose()});parts=[];selectedId=null;renderList();$('selectedName').textContent='No part selected';updateStats();$('viewStatus').textContent='No model loaded — add STL files to begin'};
+$('clearAll').onclick=()=>{parts.forEach(p=>{scene.remove(p.mesh);p.mesh.geometry.dispose();p.mesh.material.dispose()});parts=[];selectedId=null;renderList();$('selectedName').textContent='No part selected';updateStats();updateLayerPreview();$('viewStatus').textContent='No model loaded — add STL files to begin'};
 $('addFiles').onclick=()=>$('fileInput').click();$('fileInput').addEventListener('change',e=>{addFiles(e.target.files);e.target.value=''});
 const dz=$('dropZone');dz.onclick=()=>$('fileInput').click();dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag')});dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');addFiles(e.dataTransfer.files)});
 window.addEventListener('dragover',e=>e.preventDefault());window.addEventListener('drop',e=>e.preventDefault());
 
+// Remember whether the preview is following the assembly's highest point.
+// This keeps the slider pinned at the top when parts are moved upward.
+let layerPreviewAtTop=true;
+
+function updateLayerPreview(resetToTop=false){
+  const slider=$('layerSlider'),readout=$('layerReadout'),bottomLabel=$('layerBottom'),topLabel=$('layerTop');
+  const visible=parts.filter(p=>p.mesh.visible);
+  if(!visible.length){
+    slider.disabled=true;slider.min=0;slider.max=0;slider.value=0;
+    readout.textContent='No model loaded';bottomLabel.textContent='0.00 mm';topLabel.textContent='0.00 mm';
+    layerPlane.constant=0;return;
+  }
+  const bounds=new THREE.Box3();
+  visible.forEach(p=>bounds.union(geomBounds(p.mesh)));
+  const minZ=bounds.min.z,maxZ=bounds.max.z,height=Math.max(0,maxZ-minZ);
+  const step=.2;
+  slider.disabled=false;slider.min=String(minZ);slider.max=String(maxZ);
+  slider.step=String(step);
+  // On import, or while following the top, keep the preview at the
+  // assembly's current maximum Z even when a part is moved upward.
+  // If the user has manually chosen a lower layer, preserve that height.
+  if(resetToTop)layerPreviewAtTop=true;
+  let z=layerPreviewAtTop?maxZ:Number(slider.value);
+  if(!Number.isFinite(z)||z<minZ||z>maxZ){
+    z=maxZ;
+    layerPreviewAtTop=true;
+  }
+  slider.value=String(z);
+  // Keep everything at or below the selected Z height visible.
+  layerPlane.constant=z;
+  const layer=Math.max(1,Math.ceil((z-minZ)/step));
+  const totalLayers=Math.max(1,Math.ceil(height/step));
+  readout.textContent=`Layer ${layer} / ${totalLayers} · Z ${z.toFixed(2)} mm`;
+  bottomLabel.textContent=`${minZ.toFixed(2)} mm`;
+  topLabel.textContent=`${maxZ.toFixed(2)} mm`;
+}
+$('layerSlider').addEventListener('input',()=>{
+  const z=Number($('layerSlider').value);
+  const sliderMax=Number($('layerSlider').max);
+  layerPreviewAtTop=Number.isFinite(z)&&Number.isFinite(sliderMax)&&Math.abs(z-sliderMax)<0.001;
+  layerPlane.constant=Number.isFinite(z)?z:0;
+  const visible=parts.filter(p=>p.mesh.visible),bounds=new THREE.Box3();
+  visible.forEach(p=>bounds.union(geomBounds(p.mesh)));
+  if(!visible.length)return;
+  const step=.2,height=Math.max(0,bounds.max.z-bounds.min.z);
+  const layer=Math.max(1,Math.ceil((z-bounds.min.z)/step));
+  const total=Math.max(1,Math.ceil(height/step));
+  $('layerReadout').textContent=`Layer ${layer} / ${total} · Z ${z.toFixed(2)} mm`;
+});
 function updateDims(){const p=selected();if(!p){$('dimensions').textContent='Model size: —';return}const b=geomBounds(p.mesh),s=b.getSize(new THREE.Vector3());$('dimensions').innerHTML=`Part size: <strong>${s.x.toFixed(2)} × ${s.y.toFixed(2)} × ${s.z.toFixed(2)} mm</strong><br>Bottom Z: ${b.min.z.toFixed(2)} mm · Top Z: ${b.max.z.toFixed(2)} mm`}
-function updateStats(){const vis=parts.filter(p=>p.mesh.visible);let b=new THREE.Box3();vis.forEach(p=>b.union(geomBounds(p.mesh)));$('partCount').textContent=`${parts.length} part${parts.length===1?'':'s'} loaded`;if(vis.length){const s=b.getSize(new THREE.Vector3());$('modelSize').textContent=`Size: ${s.x.toFixed(1)} × ${s.y.toFixed(1)} × ${s.z.toFixed(1)} mm`;$('viewStatus').textContent=`${vis.length} visible part(s) · ${s.z.toFixed(2)} mm total height`;}else{$('modelSize').textContent='Total size: —';$('viewStatus').textContent='No visible parts'}updateDims()}
+function updateStats(){const vis=parts.filter(p=>p.mesh.visible);let b=new THREE.Box3();vis.forEach(p=>b.union(geomBounds(p.mesh)));$('partCount').textContent=`${parts.length} part${parts.length===1?'':'s'} loaded`;if(vis.length){const s=b.getSize(new THREE.Vector3());$('modelSize').textContent=`Size: ${s.x.toFixed(1)} × ${s.y.toFixed(1)} × ${s.z.toFixed(1)} mm`;$('viewStatus').textContent=`${vis.length} visible part(s) · ${s.z.toFixed(2)} mm total height`;}else{$('modelSize').textContent='Total size: —';$('viewStatus').textContent='No visible parts'}updateDims();updateLayerPreview()}
 function fitView(showToast=true){const vis=parts.filter(p=>p.mesh.visible);if(!vis.length){controls.target.set(0,0,20);camera.position.set(150,-190,150);controls.update();return}
   const b=new THREE.Box3();vis.forEach(p=>b.union(geomBounds(p.mesh)));const size=b.getSize(new THREE.Vector3()),center=b.getCenter(new THREE.Vector3());const max=Math.max(size.x,size.y,size.z,30);controls.target.copy(center);camera.position.set(center.x+max*1.4,center.y-max*1.8,center.z+max*1.25);camera.near=Math.max(.1,max/1000);camera.far=Math.max(10000,max*100);camera.updateProjectionMatrix();controls.update();if(showToast)toast('Camera fitted to assembly')}
 $('viewHome').onclick=()=>fitView();$('viewTop').onclick=()=>{const t=controls.target.clone();camera.position.set(t.x,t.y,t.z+300);camera.up.set(0,1,0);controls.target.copy(t);controls.update();camera.up.set(0,0,1);controls.update()};
