@@ -74,10 +74,11 @@ footer strong{color:var(--accent)}.footer-spacer{margin-left:auto}
     <div id="fileList" class="file-list"></div>
     <div class="tools">
       <div class="section-title">Assembly Tools</div>
+      <div class="row"><button id="undo" title="Undo (Ctrl+Z)" disabled>↶ Undo</button><button id="redo" title="Redo (Ctrl+Y)" disabled>↷ Redo</button></div>
       <div class="row"><button id="alignBase">▣ Align to Bed</button><button id="centerAll">◎ Center All</button></div>
       <div class="row"><button id="autoStack">⇵ Auto Stack (Z)</button><button id="resetAll">↺ Reset Positions</button></div>
       <div class="row"><button id="duplicate">＋ Duplicate Part</button><button id="deletePart" class="danger">Delete Selected</button></div>
-      <div class="notice">Tip: Imported STL coordinates and relative positions are preserved. Select a part, then change X/Y/Z to offset it. Use small Z steps to place colour sections precisely.</div>
+      <div class="notice">Keyboard shortcuts: <strong>Ctrl+Z</strong> undo · <strong>Ctrl+Y</strong> redo (also Ctrl+Shift+Z).<br><br>Tip: Imported STL coordinates and relative positions are preserved. Select a part, then change X/Y/Z to offset it. Use small Z steps to place colour sections precisely.</div>
     </div>
   </section>
   <section class="panel viewer">
@@ -197,10 +198,99 @@ renderer.localClippingEnabled=true;
 function toast(msg){const t=$('toast');t.textContent=msg;t.style.display='block';clearTimeout(toast.timer);toast.timer=setTimeout(()=>t.style.display='none',2600)}
 function safeName(s){return s.replace(/\.stl$/i,'').replace(/[^\w.-]+/g,'_').slice(0,80)||'part'}
 function selected(){return parts.find(p=>p.id===selectedId)||null}
+
+// Undo/redo history stores the assembly state while retaining mesh references,
+// so deleting or clearing parts can also be undone without rebuilding geometry.
+const undoStack=[],redoStack=[];
+const HISTORY_LIMIT=100;
+let restoringHistory=false;
+function captureState(){
+  return {
+    parts:parts.slice(),
+    selectedId,
+    nextId,
+    showWire,
+    states:parts.map(p=>({
+      p,
+      position:p.mesh.position.toArray(),
+      rotation:[p.mesh.rotation.x,p.mesh.rotation.y,p.mesh.rotation.z],
+      scale:p.mesh.scale.toArray(),
+      visible:p.mesh.visible,
+      color:p.color,
+      wireframe:!!p.mesh.material.wireframe
+    }))
+  };
+}
+function updateHistoryButtons(){
+  $('undo').disabled=!undoStack.length;
+  $('redo').disabled=!redoStack.length;
+}
+function recordUndo(){
+  if(restoringHistory)return;
+  undoStack.push(captureState());
+  if(undoStack.length>HISTORY_LIMIT)undoStack.shift();
+  redoStack.length=0;
+  updateHistoryButtons();
+}
+function restoreState(state){
+  restoringHistory=true;
+  const wanted=new Set(state.parts);
+  parts.forEach(p=>{if(!wanted.has(p))scene.remove(p.mesh)});
+  state.parts.forEach(p=>{
+    if(!p.mesh.parent)scene.add(p.mesh);
+  });
+  parts=state.parts.slice();
+  state.states.forEach(s=>{
+    const p=s.p;
+    p.mesh.position.fromArray(s.position);
+    p.mesh.rotation.set(...s.rotation);
+    p.mesh.scale.fromArray(s.scale);
+    p.mesh.visible=s.visible;
+    p.color=s.color;
+    p.mesh.material.color.set(s.color);
+    p.mesh.material.wireframe=s.wireframe;
+  });
+  selectedId=state.selectedId;
+  showWire=state.showWire;
+  $('wireframe').checked=showWire;
+  nextId=Math.max(state.nextId,...parts.map(p=>p.id+1),1);
+  renderList();
+  if(selectedId&&selected())selectPart(selectedId);
+  else $('selectedName').textContent='No part selected';
+  updateStats();
+  updateLayerPreview(true);
+  restoringHistory=false;
+  updateHistoryButtons();
+}
+function undo(){
+  if(!undoStack.length)return;
+  redoStack.push(captureState());
+  restoreState(undoStack.pop());
+  toast('Undo');
+}
+function redo(){
+  if(!redoStack.length)return;
+  undoStack.push(captureState());
+  restoreState(redoStack.pop());
+  toast('Redo');
+}
+$('undo').addEventListener('click',undo);
+$('redo').addEventListener('click',redo);
+window.addEventListener('keydown',e=>{
+  if(!(e.ctrlKey||e.metaKey)||e.altKey)return;
+  const key=e.key.toLowerCase();
+  if(key==='z'){
+    e.preventDefault();
+    if(e.shiftKey)redo();else undo();
+  }else if(key==='y'){
+    e.preventDefault();redo();
+  }
+});
+
 function geomBounds(obj){obj.updateMatrixWorld(true);return new THREE.Box3().setFromObject(obj)}
 function localBounds(p){return new THREE.Box3().setFromObject(p.mesh)}
 function addFiles(files){const arr=[...files].filter(f=>/\.stl$/i.test(f.name));if(!arr.length){toast('Please choose STL files.');return}
-  arr.forEach((file,i)=>{const reader=new FileReader();reader.onload=ev=>{try{
+  arr.forEach((file,i)=>{const reader=new FileReader();reader.onload=ev=>{try{recordUndo();
     const geometry=loader.parse(ev.target.result);geometry.computeVertexNormals();geometry.computeBoundingBox();
     // Preserve the STL's original vertex coordinates and placement exactly.
     // Do not center the geometry, move its bottom to Z=0, or add an import offset.
@@ -217,7 +307,7 @@ function addFiles(files){const arr=[...files].filter(f=>/\.stl$/i.test(f.name));
 }
 function renderList(){const list=$('fileList');list.innerHTML='';
   parts.forEach(p=>{const el=document.createElement('div');el.className='file'+(p.id===selectedId?' selected':'');el.innerHTML=`<span class="swatch" style="background:${p.color}"></span><div style="min-width:0"><div class="fname" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</div><div class="fmeta">${p.mesh.visible?'Visible':'Hidden'} · ${fmtBox(p)}</div></div><button class="tiny" title="Toggle visibility">${p.mesh.visible?'◉':'○'}</button>`;
-    el.addEventListener('click',e=>{if(e.target.tagName==='BUTTON'){p.mesh.visible=!p.mesh.visible;renderList();updateStats();return}selectPart(p.id)});list.appendChild(el)});
+    el.addEventListener('click',e=>{if(e.target.tagName==='BUTTON'){recordUndo();p.mesh.visible=!p.mesh.visible;renderList();updateStats();return}selectPart(p.id)});list.appendChild(el)});
 }
 function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function fmtBox(p){const b=localBounds(p),s=b.getSize(new THREE.Vector3());return `${s.x.toFixed(1)} × ${s.y.toFixed(1)} × ${s.z.toFixed(1)} mm`}
@@ -230,7 +320,7 @@ function selectPart(id){selectedId=id;const p=selected();renderList();if(!p){$('
   updateDims();
 }
 function setVal(id,v){$(id).value=Number(v.toFixed(3))}
-function readTransform(){const p=selected();if(!p)return;
+function readTransform(){const p=selected();if(!p)return;recordUndo();
   p.mesh.position.set(num('posX'),num('posY'),num('posZ'));
   p.mesh.rotation.set(THREE.MathUtils.degToRad(num('rotX')),THREE.MathUtils.degToRad(num('rotY')),THREE.MathUtils.degToRad(num('rotZ')));
   p.mesh.scale.set(Math.max(.001,num('scaleX')/100),Math.max(.001,num('scaleY')/100),Math.max(.001,num('scaleZ')/100));
@@ -238,27 +328,31 @@ function readTransform(){const p=selected();if(!p)return;
 }
 function num(id){const v=parseFloat($(id).value);return Number.isFinite(v)?v:0}
 ['posX','posY','posZ','rotX','rotY','rotZ','scaleX','scaleY','scaleZ'].forEach(id=>$(id).addEventListener('change',()=>{if(id.startsWith('scale')&&$('uniformScale').checked){const v=Math.max(.1,num(id));['scaleX','scaleY','scaleZ'].forEach(scaleId=>setVal(scaleId,v))}readTransform()}));
-$('partColor').addEventListener('input',()=>{const p=selected();if(!p)return;p.color=$('partColor').value;p.mesh.material.color.set(p.color);renderList()});
-$('partVisible').addEventListener('change',()=>{const p=selected();if(!p)return;p.mesh.visible=$('partVisible').value==='yes';renderList();updateStats()});
-$('wireframe').addEventListener('change',()=>{showWire=$('wireframe').checked;parts.forEach(p=>p.mesh.material.wireframe=showWire)});
-document.querySelectorAll('[data-axis]').forEach(b=>b.addEventListener('click',()=>{const p=selected();if(!p)return;const axis=b.dataset.axis,step=Number(b.dataset.step);p.mesh.position[axis]+=step;selectPart(p.id);updateStats()}));
+let colorEditRecorded=false;
+$('partColor').addEventListener('pointerdown',()=>{colorEditRecorded=false});
+$('partColor').addEventListener('keydown',()=>{colorEditRecorded=false});
+$('partColor').addEventListener('input',()=>{const p=selected();if(!p)return;if(!colorEditRecorded){recordUndo();colorEditRecorded=true}p.color=$('partColor').value;p.mesh.material.color.set(p.color);renderList()});
+$('partColor').addEventListener('change',()=>{colorEditRecorded=false});
+$('partVisible').addEventListener('change',()=>{const p=selected();if(!p)return;recordUndo();p.mesh.visible=$('partVisible').value==='yes';renderList();updateStats()});
+$('wireframe').addEventListener('change',()=>{recordUndo();showWire=$('wireframe').checked;parts.forEach(p=>p.mesh.material.wireframe=showWire)});
+document.querySelectorAll('[data-axis]').forEach(b=>b.addEventListener('click',()=>{const p=selected();if(!p)return;recordUndo();const axis=b.dataset.axis,step=Number(b.dataset.step);p.mesh.position[axis]+=step;selectPart(p.id);updateStats()}));
 
-$('dropToBed').onclick=()=>{const p=selected();if(!p)return;const b=geomBounds(p.mesh);p.mesh.position.z-=b.min.z;selectPart(p.id);updateStats()};
+$('dropToBed').onclick=()=>{const p=selected();if(!p)return;recordUndo();const b=geomBounds(p.mesh);p.mesh.position.z-=b.min.z;selectPart(p.id);updateStats()};
 $('moveUp').onclick=()=>moveZ(1);$('moveDown').onclick=()=>moveZ(-1);
-function moveZ(n){const p=selected();if(!p)return;p.mesh.position.z+=n;selectPart(p.id);updateStats()}
-$('sendToTop').onclick=()=>{const p=selected();if(!p)return;const others=parts.filter(q=>q!==p&&q.mesh.visible);let top=0;others.forEach(q=>top=Math.max(top,geomBounds(q.mesh).max.z));const b=geomBounds(p.mesh);p.mesh.position.z+=top-b.min.z;selectPart(p.id);updateStats()};
-$('sendToBottom').onclick=()=>{const p=selected();if(!p)return;const others=parts.filter(q=>q!==p&&q.mesh.visible);let low=0;others.forEach(q=>low=Math.min(low,geomBounds(q.mesh).min.z));const b=geomBounds(p.mesh);p.mesh.position.z+=low-b.max.z;selectPart(p.id);updateStats()};
-$('alignBase').onclick=()=>{parts.forEach(p=>{const b=geomBounds(p.mesh);p.mesh.position.z-=b.min.z});updateStats();if(selectedId)selectPart(selectedId);toast('All parts placed on the build bed')};
-$('centerAll').onclick=()=>{const vis=parts.filter(p=>p.mesh.visible);if(!vis.length)return;const b=new THREE.Box3();vis.forEach(p=>b.union(geomBounds(p.mesh)));const c=b.getCenter(new THREE.Vector3());vis.forEach(p=>{p.mesh.position.x-=c.x;p.mesh.position.y-=c.y});updateStats();toast('Assembly centred on X/Y')};
-$('autoStack').onclick=()=>{let z=0;parts.forEach(p=>{const b=geomBounds(p.mesh);p.mesh.position.z+=z-b.min.z;z=geomBounds(p.mesh).max.z});updateStats();if(selectedId)selectPart(selectedId);toast('Parts stacked vertically in file-list order')};
-$('resetAll').onclick=()=>{parts.forEach(p=>{
+function moveZ(n){const p=selected();if(!p)return;recordUndo();p.mesh.position.z+=n;selectPart(p.id);updateStats()}
+$('sendToTop').onclick=()=>{const p=selected();if(!p)return;recordUndo();const others=parts.filter(q=>q!==p&&q.mesh.visible);let top=0;others.forEach(q=>top=Math.max(top,geomBounds(q.mesh).max.z));const b=geomBounds(p.mesh);p.mesh.position.z+=top-b.min.z;selectPart(p.id);updateStats()};
+$('sendToBottom').onclick=()=>{const p=selected();if(!p)return;recordUndo();const others=parts.filter(q=>q!==p&&q.mesh.visible);let low=0;others.forEach(q=>low=Math.min(low,geomBounds(q.mesh).min.z));const b=geomBounds(p.mesh);p.mesh.position.z+=low-b.max.z;selectPart(p.id);updateStats()};
+$('alignBase').onclick=()=>{if(!parts.length)return;recordUndo();parts.forEach(p=>{const b=geomBounds(p.mesh);p.mesh.position.z-=b.min.z});updateStats();if(selectedId)selectPart(selectedId);toast('All parts placed on the build bed')};
+$('centerAll').onclick=()=>{const vis=parts.filter(p=>p.mesh.visible);if(!vis.length)return;recordUndo();const b=new THREE.Box3();vis.forEach(p=>b.union(geomBounds(p.mesh)));const c=b.getCenter(new THREE.Vector3());vis.forEach(p=>{p.mesh.position.x-=c.x;p.mesh.position.y-=c.y});updateStats();toast('Assembly centred on X/Y')};
+$('autoStack').onclick=()=>{if(!parts.length)return;recordUndo();let z=0;parts.forEach(p=>{const b=geomBounds(p.mesh);p.mesh.position.z+=z-b.min.z;z=geomBounds(p.mesh).max.z});updateStats();if(selectedId)selectPart(selectedId);toast('Parts stacked vertically in file-list order')};
+$('resetAll').onclick=()=>{if(!parts.length)return;recordUndo();parts.forEach(p=>{
   p.mesh.position.set(p.initial.x,p.initial.y,p.initial.z);
   p.mesh.rotation.set(p.initial.rx,p.initial.ry,p.initial.rz);
   p.mesh.scale.set(p.initial.sx,p.initial.sy,p.initial.sz);
 });updateStats();if(selectedId)selectPart(selectedId);fitView(false);toast('All parts returned to their imported positions')};
-$('duplicate').onclick=()=>{const p=selected();if(!p)return;const geo=p.mesh.geometry.clone(),mat=p.mesh.material.clone(),mesh=new THREE.Mesh(geo,mat);mesh.position.copy(p.mesh.position).add(new THREE.Vector3(5,5,0));mesh.rotation.copy(p.mesh.rotation);mesh.scale.copy(p.mesh.scale);mesh.castShadow=true;mesh.receiveShadow=true;const id=nextId++;mesh.userData.partId=id;scene.add(mesh);parts.push({id,name:p.baseName+'_copy.stl',baseName:p.baseName+'_copy',mesh,color:p.color,initial:{}});selectPart(id);updateStats();toast('Part duplicated')};
-$('deletePart').onclick=()=>{const p=selected();if(!p)return;scene.remove(p.mesh);p.mesh.geometry.dispose();p.mesh.material.dispose();parts=parts.filter(q=>q!==p);selectedId=parts.length?parts[0].id:null;renderList();if(selectedId)selectPart(selectedId);else{$('selectedName').textContent='No part selected'}updateStats();toast('Selected part deleted')};
-$('clearAll').onclick=()=>{parts.forEach(p=>{scene.remove(p.mesh);p.mesh.geometry.dispose();p.mesh.material.dispose()});parts=[];selectedId=null;renderList();$('selectedName').textContent='No part selected';updateStats();updateLayerPreview();$('viewStatus').textContent='No model loaded — add STL files to begin'};
+$('duplicate').onclick=()=>{const p=selected();if(!p)return;recordUndo();const geo=p.mesh.geometry.clone(),mat=p.mesh.material.clone(),mesh=new THREE.Mesh(geo,mat);mesh.position.copy(p.mesh.position).add(new THREE.Vector3(5,5,0));mesh.rotation.copy(p.mesh.rotation);mesh.scale.copy(p.mesh.scale);mesh.castShadow=true;mesh.receiveShadow=true;const id=nextId++;mesh.userData.partId=id;scene.add(mesh);parts.push({id,name:p.baseName+'_copy.stl',baseName:p.baseName+'_copy',mesh,color:p.color,initial:{}});selectPart(id);updateStats();toast('Part duplicated')};
+$('deletePart').onclick=()=>{const p=selected();if(!p)return;recordUndo();scene.remove(p.mesh);p.mesh.geometry.dispose();p.mesh.material.dispose();parts=parts.filter(q=>q!==p);selectedId=parts.length?parts[0].id:null;renderList();if(selectedId)selectPart(selectedId);else{$('selectedName').textContent='No part selected'}updateStats();toast('Selected part deleted')};
+$('clearAll').onclick=()=>{if(!parts.length)return;recordUndo();parts.forEach(p=>{scene.remove(p.mesh);p.mesh.geometry.dispose();p.mesh.material.dispose()});parts=[];selectedId=null;renderList();$('selectedName').textContent='No part selected';updateStats();updateLayerPreview();$('viewStatus').textContent='No model loaded — add STL files to begin'};
 $('addFiles').onclick=()=>$('fileInput').click();$('fileInput').addEventListener('change',e=>{addFiles(e.target.files);e.target.value=''});
 const dz=$('dropZone');dz.onclick=()=>$('fileInput').click();dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag')});dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');addFiles(e.dataTransfer.files)});
 window.addEventListener('dragover',e=>e.preventDefault());window.addEventListener('drop',e=>e.preventDefault());
@@ -338,7 +432,7 @@ const raycaster=new THREE.Raycaster(),pointer=new THREE.Vector2();
 canvas.addEventListener('pointerdown',e=>{if(e.button!==0)return;const rect=canvas.getBoundingClientRect();pointer.x=((e.clientX-rect.left)/rect.width)*2-1;pointer.y=-((e.clientY-rect.top)/rect.height)*2+1;raycaster.setFromCamera(pointer,camera);const hits=raycaster.intersectObjects(parts.filter(p=>p.mesh.visible).map(p=>p.mesh),false);if(hits.length){const id=hits[0].object.userData.partId;if(id)selectPart(id)}});
 function resize(){const w=viewer.clientWidth,h=viewer.clientHeight;renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix()}new ResizeObserver(resize).observe(viewer);resize();
 function animate(){requestAnimationFrame(animate);controls.update();renderer.render(scene,camera)}animate();
-function setInitialCamera(){camera.position.set(180,-220,160);controls.target.set(0,0,25);controls.update()}setInitialCamera();updateStats();
+function setInitialCamera(){camera.position.set(180,-220,160);controls.target.set(0,0,25);controls.update()}setInitialCamera();updateStats();updateHistoryButtons();
 </script>
 </body>
 </html>
