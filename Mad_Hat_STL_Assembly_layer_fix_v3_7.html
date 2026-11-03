@@ -365,46 +365,69 @@ function updateLayerPreview(resetToTop=false){
   const slider=$('layerSlider'),readout=$('layerReadout'),bottomLabel=$('layerBottom'),topLabel=$('layerTop');
   const visible=parts.filter(p=>p.mesh.visible);
   if(!visible.length){
-    slider.disabled=true;slider.min=0;slider.max=0;slider.value=0;
+    slider.disabled=true;slider.min=0;slider.max=1;slider.step='any';slider.value=0;
     readout.textContent='No model loaded';bottomLabel.textContent='0.00 mm';topLabel.textContent='0.00 mm';
     layerPlane.constant=0;return;
   }
+
   const bounds=new THREE.Box3();
   visible.forEach(p=>bounds.union(geomBounds(p.mesh)));
-  const minZ=bounds.min.z,maxZ=bounds.max.z,height=Math.max(0,maxZ-minZ);
-  const step=.2;
-  slider.disabled=false;slider.min=String(minZ);slider.max=String(maxZ);
-  slider.step=String(step);
-  // On import, or while following the top, keep the preview at the
-  // assembly's current maximum Z even when a part is moved upward.
-  // If the user has manually chosen a lower layer, preserve that height.
+  const minZ=bounds.min.z,maxZ=bounds.max.z;
+  const height=Math.max(0,maxZ-minZ);
+  const layerHeight=.2;
+  const epsilon=Math.max(.001,Math.min(.01,layerHeight*.025));
+  const firstLayerTop=Math.min(maxZ,minZ+layerHeight);
+  // The range's maximum is deliberately above the STL. Using step="any"
+  // is important: a 0.2 step can prevent the browser reaching this exact max.
+  const sliderTop=maxZ+epsilon;
+
+  slider.disabled=false;
+  slider.min=String(firstLayerTop);
+  slider.max=String(sliderTop);
+  slider.step='any';
+
   if(resetToTop)layerPreviewAtTop=true;
-  let z=layerPreviewAtTop?maxZ:Number(slider.value);
-  if(!Number.isFinite(z)||z<minZ||z>maxZ){
-    z=maxZ;
+  let value=layerPreviewAtTop?sliderTop:Number(slider.value);
+  if(!Number.isFinite(value)||value<firstLayerTop||value>sliderTop){
+    value=sliderTop;
     layerPreviewAtTop=true;
   }
-  slider.value=String(z);
-  // Keep everything at or below the selected Z height visible.
-  layerPlane.constant=z;
-  const layer=Math.max(1,Math.ceil((z-minZ)/step));
-  const totalLayers=Math.max(1,Math.ceil(height/step));
-  readout.textContent=`Layer ${layer} / ${totalLayers} · Z ${z.toFixed(2)} mm`;
+  // When at the top, move the clipping plane beyond the highest vertex.
+  // This prevents coplanar top triangles from being intermittently clipped.
+  const atTop=layerPreviewAtTop||value>=sliderTop-1e-7;
+  if(atTop){value=sliderTop;layerPreviewAtTop=true;}
+  slider.value=String(value);
+  layerPlane.constant=atTop?sliderTop:value;
+
+  const shownHeight=atTop?height:Math.max(layerHeight,value-minZ);
+  const totalLayers=Math.max(1,Math.ceil(height/layerHeight));
+  const layer=Math.max(1,Math.min(totalLayers,Math.ceil(shownHeight/layerHeight)));
+  const readoutZ=atTop?maxZ:Math.min(maxZ,value);
+  readout.textContent=`Layer ${layer} / ${totalLayers} · Z ${readoutZ.toFixed(2)} mm`;
   bottomLabel.textContent=`${minZ.toFixed(2)} mm`;
   topLabel.textContent=`${maxZ.toFixed(2)} mm`;
 }
 $('layerSlider').addEventListener('input',()=>{
-  const z=Number($('layerSlider').value);
-  const sliderMax=Number($('layerSlider').max);
-  layerPreviewAtTop=Number.isFinite(z)&&Number.isFinite(sliderMax)&&Math.abs(z-sliderMax)<0.001;
-  layerPlane.constant=Number.isFinite(z)?z:0;
-  const visible=parts.filter(p=>p.mesh.visible),bounds=new THREE.Box3();
-  visible.forEach(p=>bounds.union(geomBounds(p.mesh)));
+  const slider=$('layerSlider');
+  const value=Number(slider.value),sliderTop=Number(slider.max);
+  if(!Number.isFinite(value))return;
+  const visible=parts.filter(p=>p.mesh.visible);
   if(!visible.length)return;
-  const step=.2,height=Math.max(0,bounds.max.z-bounds.min.z);
-  const layer=Math.max(1,Math.ceil((z-bounds.min.z)/step));
-  const total=Math.max(1,Math.ceil(height/step));
-  $('layerReadout').textContent=`Layer ${layer} / ${total} · Z ${z.toFixed(2)} mm`;
+  const bounds=new THREE.Box3();
+  visible.forEach(p=>bounds.union(geomBounds(p.mesh)));
+  const minZ=bounds.min.z,maxZ=bounds.max.z,height=Math.max(0,maxZ-minZ);
+  const layerHeight=.2;
+  const epsilon=Math.max(.001,Math.min(.01,layerHeight*.025));
+  const atTop=value>=sliderTop-1e-7;
+  layerPreviewAtTop=atTop;
+  // Explicitly place the plane above maxZ when the thumb reaches the end.
+  // Do not use the raw slider value here: browser range rounding can differ.
+  layerPlane.constant=atTop?maxZ+epsilon:value;
+  const shownHeight=atTop?height:Math.max(layerHeight,value-minZ);
+  const totalLayers=Math.max(1,Math.ceil(height/layerHeight));
+  const layer=Math.max(1,Math.min(totalLayers,Math.ceil(shownHeight/layerHeight)));
+  const readoutZ=atTop?maxZ:Math.min(maxZ,value);
+  $('layerReadout').textContent=`Layer ${layer} / ${totalLayers} · Z ${readoutZ.toFixed(2)} mm`;
 });
 function updateDims(){const p=selected();if(!p){$('dimensions').textContent='Model size: —';return}const b=geomBounds(p.mesh),s=b.getSize(new THREE.Vector3());$('dimensions').innerHTML=`Part size: <strong>${s.x.toFixed(2)} × ${s.y.toFixed(2)} × ${s.z.toFixed(2)} mm</strong><br>Bottom Z: ${b.min.z.toFixed(2)} mm · Top Z: ${b.max.z.toFixed(2)} mm`}
 function updateStats(){const vis=parts.filter(p=>p.mesh.visible);let b=new THREE.Box3();vis.forEach(p=>b.union(geomBounds(p.mesh)));$('partCount').textContent=`${parts.length} part${parts.length===1?'':'s'} loaded`;if(vis.length){const s=b.getSize(new THREE.Vector3());$('modelSize').textContent=`Size: ${s.x.toFixed(1)} × ${s.y.toFixed(1)} × ${s.z.toFixed(1)} mm`;$('viewStatus').textContent=`${vis.length} visible part(s) · ${s.z.toFixed(2)} mm total height`;}else{$('modelSize').textContent='Total size: —';$('viewStatus').textContent='No visible parts'}updateDims();updateLayerPreview()}
